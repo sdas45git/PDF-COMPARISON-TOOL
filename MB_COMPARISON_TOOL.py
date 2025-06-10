@@ -12,6 +12,7 @@ import pytesseract
 from PIL import Image, ImageEnhance, ImageFilter
 import io
 import base64
+import bcrypt
 
 # Suppress MuPDF error messages to keep the terminal clean
 fitz.TOOLS.mupdf_display_errors(False)
@@ -35,6 +36,8 @@ from datetime import datetime
 import time
 import logging
 import concurrent.futures
+from dotenv import load_dotenv
+load_dotenv()
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -70,6 +73,41 @@ LOGO_URL = "https://marblebox.com/wp-content/uploads/2024/12/logo.svg"
 ICON_URL = "https://hebbkx1anhila5yf.public.blob.vercel-storage.com/Marble%20Box%20logo%20Symbol_Colour-6MaHGSNNlEiGfa9Puy91URxaCtw5QA.png"
 
 # ---------------------------
+# Styling Helper Functions
+# ---------------------------
+def get_input_field_style():
+    return f"padding: 8px; font-size: 14px; border: 1px solid {COLORS['login_disabled']}; border-radius: 5px;"
+
+def get_primary_button_style(font_size="16px"):
+    return f"background-color: {COLORS['login_primary']}; color: white; padding: 10px; border-radius: 5px; font-size: {font_size};"
+
+def get_secondary_button_style(font_size="16px"):
+    return f"background-color: {COLORS['login_secondary']}; color: white; padding: 10px; border-radius: 5px; font-size: {font_size};"
+
+def get_accent_button_style(font_size="16px"):
+    return f"background-color: {COLORS['login_accent']}; color: white; padding: 10px; border-radius: 5px; font-size: {font_size};"
+
+def get_dialog_button_style(color_key='button', font_size="14px"):
+    return f"""
+        QPushButton {{
+            background-color: {COLORS[color_key]};
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: {font_size};
+        }}
+        QPushButton:hover {{
+            background-color: {COLORS.get(color_key + '_hover', COLORS[color_key])};
+        }}
+    """
+
+def get_dialog_input_style():
+    return f"padding: 8px; font-size: 14px; border: 1px solid {COLORS['border']}; border-radius: 5px;"
+
+def get_dialog_label_style():
+     return f"color: {COLORS['primary']}; font-size: 14px;"
+
+# ---------------------------
 # SharePoint and Share Drive Configuration
 # ---------------------------
 SHAREPOINT_USERNAME = "sharepoint_user"
@@ -82,11 +120,11 @@ SHAREDRIVE_PERSONAL = os.path.join(SHAREDRIVE_FOLDER, "Personal Line")
 # Enhanced Email Configuration
 # ---------------------------
 EMAIL_CONFIG = {
-    'smtp_server': 'smtp.office365.com',
-    'smtp_port': 587,
-    'sender_email': 'noreply_automation@marblebox.com',
-    'sender_password': 'M@rbleb0x@bfg642025$',
-    'use_tls': True,
+    'smtp_server': os.getenv('EMAIL_HOST', 'smtp.office365.com'),
+    'smtp_port': int(os.getenv('EMAIL_PORT', 587)), # Ensure port is an integer
+    'sender_email': os.getenv('EMAIL_USER'),
+    'sender_password': os.getenv('EMAIL_PASSWORD'),
+    'use_tls': os.getenv('EMAIL_USE_TLS', 'True').lower() == 'true', # Handle boolean conversion
     'timeout': 30,
     'retry_attempts': 3,
     'retry_delay': 2
@@ -133,19 +171,22 @@ class EmailThread(QThread):
 
     def run(self):
         """Enhanced email sending with better error handling and retry logic"""
+        logging.info(f"Attempting to send email via {self.config['smtp_server']}:{self.config['smtp_port']}")
+        logging.info(f"Using TLS: {self.config['use_tls']}")
+        logging.info(f"Sender email: {self.config['sender_email']}") # Be cautious about logging PII
         for attempt in range(self.config['retry_attempts']):
             try:
                 self.progress_signal.emit(f"Attempting to send email (attempt {attempt + 1}/{self.config['retry_attempts']})...")
-                
+
                 # Create message
                 msg = MIMEMultipart()
                 msg['From'] = self.config['sender_email']
                 msg['To'] = self.recipient
                 msg['Subject'] = self.subject
-                
+
                 # Add body
                 msg.attach(MIMEText(self.body, 'plain'))
-                
+
                 # Add attachments if any
                 for attachment_path in self.attachments:
                     if os.path.exists(attachment_path):
@@ -158,57 +199,62 @@ class EmailThread(QThread):
                                 f'attachment; filename= {os.path.basename(attachment_path)}'
                             )
                             msg.attach(part)
-                
+
                 # Create secure connection and send
                 context = ssl.create_default_context()
-                
+
                 self.progress_signal.emit("Connecting to SMTP server...")
                 with smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'], timeout=self.config['timeout']) as server:
                     server.ehlo()
-                    
+
                     if self.config['use_tls']:
                         self.progress_signal.emit("Starting TLS encryption...")
                         server.starttls(context=context)
                         server.ehlo()
-                    
+
                     self.progress_signal.emit("Authenticating...")
                     server.login(self.config['sender_email'], self.config['sender_password'])
-                    
+
                     self.progress_signal.emit("Sending email...")
                     text = msg.as_string()
                     server.sendmail(self.config['sender_email'], self.recipient, text)
-                    
+
                 self.progress_signal.emit("Email sent successfully!")
                 self.finished_signal.emit(True, "")
                 return
-                
+
             except smtplib.SMTPAuthenticationError as e:
                 error_msg = f"SMTP Authentication failed: {str(e)}"
                 logging.error(error_msg)
                 if attempt == self.config['retry_attempts'] - 1:
                     self.finished_signal.emit(False, error_msg)
                     return
-                    
+
             except smtplib.SMTPRecipientsRefused as e:
                 error_msg = f"Recipient refused: {str(e)}"
                 logging.error(error_msg)
                 self.finished_signal.emit(False, error_msg)
                 return
-                
+
             except smtplib.SMTPServerDisconnected as e:
                 error_msg = f"SMTP server disconnected: {str(e)}"
                 logging.error(error_msg)
                 if attempt == self.config['retry_attempts'] - 1:
                     self.finished_signal.emit(False, error_msg)
                     return
-                    
+            except smtplib.SMTPException as e: # Add this more specific catch
+                error_msg = f"SMTP general error: {str(e)}"
+                logging.error(error_msg) # Ensure this is logged
+                if attempt == self.config['retry_attempts'] - 1: # Ensure this attempt check is present
+                    self.finished_signal.emit(False, error_msg)
+                    return
             except Exception as e:
                 error_msg = f"Email send error: {str(e)}"
                 logging.error(error_msg)
                 if attempt == self.config['retry_attempts'] - 1:
                     self.finished_signal.emit(False, error_msg)
                     return
-            
+
             # Wait before retry
             if attempt < self.config['retry_attempts'] - 1:
                 self.progress_signal.emit(f"Retrying in {self.config['retry_delay']} seconds...")
@@ -216,18 +262,22 @@ class EmailThread(QThread):
 
 def send_email(recipient, subject, body, attachments=None):
     """Enhanced email sending function with better error handling"""
+    if not EMAIL_CONFIG['sender_email'] or not EMAIL_CONFIG['sender_password']:
+        logging.error("Email sender_email or sender_password not configured in .env file. Cannot send email.")
+        # Optionally, you could raise an error here or inform the user via UI if appropriate
+        return None # Indicate that email sending cannot proceed
     global email_threads
     thread = EmailThread(recipient, subject, body, attachments)
-    
+
     def cleanup(success, error):
         if thread in email_threads:
             email_threads.remove(thread)
         if not success:
             logging.error(f"Email delivery failed: {error}")
-    
+
     def progress_update(message):
         logging.info(f"Email progress: {message}")
-    
+
     thread.finished_signal.connect(cleanup)
     thread.progress_signal.connect(progress_update)
     email_threads.append(thread)
@@ -239,7 +289,7 @@ def send_email(recipient, subject, body, attachments=None):
 # ---------------------------
 class EnhancedOCR:
     """Enhanced OCR class for better text extraction from challenging documents"""
-    
+
     def __init__(self):
         # Configure Tesseract if available
         try:
@@ -254,7 +304,7 @@ class EnhancedOCR:
                     if os.path.exists(path):
                         pytesseract.pytesseract.tesseract_cmd = path
                         break
-            
+
             # Test if tesseract is working
             pytesseract.get_tesseract_version()
             self.tesseract_available = True
@@ -262,7 +312,7 @@ class EnhancedOCR:
         except Exception as e:
             self.tesseract_available = False
             logging.warning(f"Tesseract OCR not available: {e}")
-    
+
     def preprocess_image(self, image):
         """Apply various preprocessing techniques to improve OCR accuracy"""
         try:
@@ -271,109 +321,109 @@ class EnhancedOCR:
                 opencv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
             else:
                 opencv_image = image
-            
+
             # Convert to grayscale
             gray = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2GRAY)
-            
+
             # Apply different preprocessing techniques
             processed_images = []
-            
+
             # Original grayscale
             processed_images.append(('original', gray))
-            
+
             # Gaussian blur + threshold
             blurred = cv2.GaussianBlur(gray, (5, 5), 0)
             _, thresh1 = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             processed_images.append(('gaussian_otsu', thresh1))
-            
+
             # Adaptive threshold
             adaptive_thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
             processed_images.append(('adaptive', adaptive_thresh))
-            
+
             # Morphological operations
             kernel = np.ones((2, 2), np.uint8)
             morph = cv2.morphologyEx(thresh1, cv2.MORPH_CLOSE, kernel)
             processed_images.append(('morphological', morph))
-            
+
             # Dilation and erosion
             dilated = cv2.dilate(thresh1, kernel, iterations=1)
             eroded = cv2.erode(dilated, kernel, iterations=1)
             processed_images.append(('dilate_erode', eroded))
-            
+
             return processed_images
-            
+
         except Exception as e:
             logging.error(f"Error in image preprocessing: {e}")
             return [('original', image)]
-    
+
     def extract_text_with_ocr(self, image):
         """Extract text using multiple OCR techniques"""
         if not self.tesseract_available:
             return ""
-        
+
         try:
             processed_images = self.preprocess_image(image)
             best_text = ""
             max_confidence = 0
-            
+
             for name, processed_img in processed_images:
                 try:
                     # Convert back to PIL Image for tesseract
                     pil_img = Image.fromarray(processed_img)
-                    
+
                     # Try different PSM modes
                     psm_modes = [6, 8, 13, 3, 4]  # Different page segmentation modes
-                    
+
                     for psm in psm_modes:
                         try:
                             custom_config = f'--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,/$%()-: '
-                            
+
                             # Get text with confidence
                             data = pytesseract.image_to_data(pil_img, config=custom_config, output_type=pytesseract.Output.DICT)
-                            
+
                             # Calculate average confidence
                             confidences = [int(conf) for conf in data['conf'] if int(conf) > 0]
                             if confidences:
                                 avg_confidence = sum(confidences) / len(confidences)
                                 text = pytesseract.image_to_string(pil_img, config=custom_config).strip()
-                                
+
                                 if avg_confidence > max_confidence and len(text) > len(best_text):
                                     max_confidence = avg_confidence
                                     best_text = text
                                     logging.info(f"Better OCR result with {name} preprocessing, PSM {psm}, confidence: {avg_confidence:.2f}")
-                        
+
                         except Exception as e:
                             continue
-                
+
                 except Exception as e:
                     logging.error(f"Error processing {name}: {e}")
                     continue
-            
+
             return best_text
-            
+
         except Exception as e:
             logging.error(f"Error in OCR text extraction: {e}")
             return ""
-    
+
     def enhance_image_quality(self, image):
         """Enhance image quality for better OCR results"""
         try:
             if isinstance(image, np.ndarray):
                 image = Image.fromarray(image)
-            
+
             # Increase contrast
             enhancer = ImageEnhance.Contrast(image)
             image = enhancer.enhance(1.5)
-            
+
             # Increase sharpness
             enhancer = ImageEnhance.Sharpness(image)
             image = enhancer.enhance(2.0)
-            
+
             # Apply unsharp mask
             image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
-            
+
             return image
-            
+
         except Exception as e:
             logging.error(f"Error enhancing image quality: {e}")
             return image
@@ -620,7 +670,7 @@ def transform_crpo_json_auto(crpo_json):
             new_tab1[key.strip()] = value
         new_tab2 = {}
         if "TAB 2 - CPRO - COVERAGES" in crpo_json:
-            new_tab2 = crpo_json["TAB 2 - CPRO - COVERAGES"]
+            new_tab2 = cgl_json["TAB 2 - CPRO - COVERAGES"]
         return {"TAB1": new_tab1, "TAB2": new_tab2}
     else:
         return crpo_json
@@ -705,7 +755,7 @@ class PDFProcessingThread(QThread):
     def run(self):
         try:
             self.progress_update.emit("Starting PDF processing...")
-            
+
             if isinstance(self.field_definitions, dict):
                 # Distinguish whether this is a CGL route vs. CRPO route vs. generic route vs. default workers comp
                 if "TAB1" in self.field_definitions and "TAB2" in self.field_definitions and "PARAMETERS" in self.field_definitions["TAB2"]:
@@ -715,7 +765,7 @@ class PDFProcessingThread(QThread):
                         sample_param = self.field_definitions["TAB2"]["PARAMETERS"][0] if self.field_definitions["TAB2"]["PARAMETERS"] else {}
                         if isinstance(sample_param, dict) and "Subject of Insurance" in sample_param:
                             is_crpo = True
-                    
+
                     if is_crpo:
                         # This is CRPO route
                         self.progress_update.emit("Processing CRPO documents...")
@@ -766,7 +816,7 @@ class PDFProcessingThread(QThread):
                         raise Exception("Failed to export results to Excel")
             else:
                 raise Exception("Invalid field definitions format")
-            
+
             self.progress_update.emit("Processing completed successfully!")
             self.processing_done.emit(data1, data2, "")
         except Exception as e:
@@ -777,24 +827,24 @@ class PDFProcessingThread(QThread):
         """Enhanced text extraction with OCR fallback for challenging documents"""
         try:
             self.progress_update.emit(f"Extracting text from {os.path.basename(file_path)}...")
-            
+
             doc = fitz.open(file_path)
             pages = list(doc)
             max_workers = (os.cpu_count() or 4) * 16
-            
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 results = list(executor.map(self.process_page_enhanced, pages))
-            
+
             text_by_page = [res[0] for res in results]
             tables_by_page = []
             for res in results:
                 tables_by_page.extend(res[1])
-            
+
             doc.close()
-            
+
             # Combine all text
             combined_text = "\n".join(text_by_page)
-            
+
             # If text extraction was poor, try OCR on the entire document
             if len(combined_text.strip()) < 100:  # Very little text extracted
                 self.progress_update.emit("Text extraction was limited, applying OCR...")
@@ -802,9 +852,9 @@ class PDFProcessingThread(QThread):
                 if len(ocr_text) > len(combined_text):
                     combined_text = ocr_text
                     logging.info("OCR provided better text extraction results")
-            
+
             return {'text': combined_text, 'tables': tables_by_page}
-            
+
         except Exception as e:
             logging.error(f"Error extracting text from PDF: {e}")
             # Fallback to OCR if regular extraction fails
@@ -825,10 +875,10 @@ class PDFProcessingThread(QThread):
             except Exception as e:
                 logging.error(f"Page text extraction error: {e}")
                 text_dict = {"blocks": []}
-            
+
             blocks = text_dict.get("blocks", [])
             blocks.sort(key=lambda b: (b.get("bbox", [0, 0])[1], b.get("bbox", [0, 0])[0]))
-            
+
             page_text = []
             current_section = []
             last_y = None
@@ -861,12 +911,12 @@ class PDFProcessingThread(QThread):
                     last_y = current_y
                     last_font = current_font
                     last_size = current_size
-            
+
             if current_section:
                 page_text.append(" ".join(current_section))
 
             extracted_text = "\n".join(page_text)
-            
+
             # If very little text was extracted, try OCR on this page
             if len(extracted_text.strip()) < 50:
                 try:
@@ -874,16 +924,16 @@ class PDFProcessingThread(QThread):
                     mat = fitz.Matrix(2.0, 2.0)  # Higher resolution
                     pix = page.get_pixmap(matrix=mat)
                     img_data = pix.tobytes("png")
-                    
+
                     # Convert to PIL Image
                     image = Image.open(io.BytesIO(img_data))
-                    
+
                     # Apply OCR
                     ocr_text = self.enhanced_ocr.extract_text_with_ocr(image)
                     if len(ocr_text.strip()) > len(extracted_text.strip()):
                         extracted_text = ocr_text
                         logging.info(f"OCR improved text extraction for page")
-                
+
                 except Exception as e:
                     logging.error(f"OCR processing failed for page: {e}")
 
@@ -921,7 +971,7 @@ class PDFProcessingThread(QThread):
                     logging.error(f"Table extraction error on page: {e}")
 
             return (extracted_text, tables_by_page)
-            
+
         except Exception as e:
             logging.error(f"Error processing page: {e}")
             return ("", [])
@@ -931,29 +981,29 @@ class PDFProcessingThread(QThread):
         try:
             doc = fitz.open(file_path)
             all_text = []
-            
+
             for page_num in range(len(doc)):
                 page = doc.load_page(page_num)
-                
+
                 # Convert page to high-resolution image
                 mat = fitz.Matrix(3.0, 3.0)  # High resolution for better OCR
                 pix = page.get_pixmap(matrix=mat)
                 img_data = pix.tobytes("png")
-                
+
                 # Convert to PIL Image
                 image = Image.open(io.BytesIO(img_data))
-                
+
                 # Enhance image quality
                 enhanced_image = self.enhanced_ocr.enhance_image_quality(image)
-                
+
                 # Extract text with OCR
                 page_text = self.enhanced_ocr.extract_text_with_ocr(enhanced_image)
                 if page_text.strip():
                     all_text.append(page_text)
-            
+
             doc.close()
             return "\n".join(all_text)
-            
+
         except Exception as e:
             logging.error(f"Error applying OCR to PDF: {e}")
             return ""
@@ -1001,10 +1051,10 @@ Use the following synonyms for the parameters if they appear in the document:
 - Other States Insurance - 3.C: "Other States Coverage", "Multi-State Insurance - 3.C"
   (Extract only state abbreviations or codes such as ND, OH, WA, WY; ignore any other descriptive text.)
 - Code: "Classification Code", "Coverage Code", "Employer Code"
-  (Extract the full classification codes from anywhere in the document, ignoring extraneous text. 
+  (Extract the full classification codes from anywhere in the document, ignoring extraneous text.
    Do not use any predetermined regex or pattern.)
 - Classification: "Job Classification", "Policy Classification"
-  (Extract only actual job/work classifications; 
+  (Extract only actual job/work classifications;
    specifically exclude these items if they appear:
      "INCREASED LIMITS OF EMPLOYERS LIABILITY",
      "TO EQUAL MINIMUM PREMIUM (E L)",
@@ -1135,8 +1185,8 @@ Return only a valid JSON object.
           - Waiver of Subrogation – Blanket or Specific (from the ADITIONAL/OTHER INTEREST section)
           - Policy forms / endorsements with full writeup and numbering
 
-        IMPORTANT: Also ensure that **all classification lines** (if multiple) are fully captured and listed 
-        under TAB2 -> PARAMETERS so that none are missing. 
+        IMPORTANT: Also ensure that **all classification lines** (if multiple) are fully captured and listed
+        under TAB2 -> PARAMETERS so that none are missing.
         """
         table_data_summary = self.process_table_data_all(content['tables'])
         reference_json = json.dumps(self.field_definitions, indent=2)
@@ -1469,8 +1519,8 @@ Ensure that all coverage details are fully captured without omission.
         Creates two sheets:
           1) "CGL - Comparison Results" (TAB1)
           2) "CGL - Classification" (TAB2)
-        We keep existing structure, ensuring we handle newly added fields (like professional liability, 
-        sexual abuse limits, additional insured, etc.) but do NOT alter how Tab1 is displayed, 
+        We keep existing structure, ensuring we handle newly added fields (like professional liability,
+        sexual abuse limits, additional insured, etc.) but do NOT alter how Tab1 is displayed,
         and ensure no classification is lost from Tab2.
         """
         try:
@@ -1667,7 +1717,7 @@ Ensure that all coverage details are fully captured without omission.
         Creates two sheets:
           1) "CRPO - Comparison Results" (TAB1)
           2) "CRPO - Coverages" (TAB2)
-        
+
         The first sheet shows general policy information, locations, and other details.
         The second sheet shows property coverages with location-specific and blanket coverages.
         """
@@ -1775,7 +1825,7 @@ Ensure that all coverage details are fully captured without omission.
 
             # --- Export TAB2 - Coverages ---
             tab2_sheet = workbook.create_sheet("CRPO - Coverages")
-            
+
             # Create headers for location specific coverages
             tab2_sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=9)
             cell = tab2_sheet.cell(row=1, column=1, value="Prior Term")
@@ -1783,20 +1833,20 @@ Ensure that all coverage details are fully captured without omission.
             cell.fill = blue_fill
             cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
             cell.border = thin_border
-            
+
             tab2_sheet.merge_cells(start_row=1, start_column=10, end_row=1, end_column=18)
             cell = tab2_sheet.cell(row=1, column=10, value="Current Term")
             cell.font = header_font
             cell.fill = blue_fill
             cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
             cell.border = thin_border
-            
+
             cell = tab2_sheet.cell(row=1, column=19, value="Status")
             cell.font = header_font
             cell.fill = blue_fill
             cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
             cell.border = thin_border
-            
+
             # Create section header for location specific coverages
             tab2_sheet.merge_cells(start_row=2, start_column=1, end_row=2, end_column=18)
             cell = tab2_sheet.cell(row=2, column=1, value="COMMERCIAL PROPERTY LOCATION SPECIFIC COVERAGES")
@@ -1805,7 +1855,7 @@ Ensure that all coverage details are fully captured without omission.
             cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
             cell.border = thin_border
             tab2_sheet.cell(row=2, column=19, value="").border = thin_border
-            
+
             # Create column headers for location specific coverages
             coverage_headers = ["Loc.#", "Bldg.", "Subject of Insurance", "Limit", "Co-Ins %", "Valuation", "Cause of Loss", "AOP Ded.", "W/H Ded."]
             for j, header in enumerate(coverage_headers, start=1):
@@ -1814,62 +1864,62 @@ Ensure that all coverage details are fully captured without omission.
                 cell.fill = blue_fill
                 cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
                 cell.border = thin_border
-            
+
             for j, header in enumerate(coverage_headers, start=10):
                 cell = tab2_sheet.cell(row=3, column=j, value=header)
                 cell.font = header_font
                 cell.fill = blue_fill
                 cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
                 cell.border = thin_border
-            
+
             cell = tab2_sheet.cell(row=3, column=19, value="")
             cell.border = thin_border
-            
+
             # Process location specific coverages
             prior_coverages = tab2_prior.get("PARAMETERS", [])
             current_coverages = tab2_current.get("PARAMETERS", [])
-            
+
             if not isinstance(prior_coverages, list):
                 prior_coverages = []
             if not isinstance(current_coverages, list):
                 current_coverages = []
-            
+
             # Fill in location specific coverages data
             row_idx = 4
             max_coverages = max(len(prior_coverages), len(current_coverages))
-            
+
             for i in range(max_coverages):
                 p_cov = prior_coverages[i] if i < len(prior_coverages) else {}
                 c_cov = current_coverages[i] if i < len(current_coverages) else {}
-                
+
                 # Prior term data
                 for j, key in enumerate(coverage_headers, start=1):
                     val = p_cov.get(key.replace(".", "#"), "") if key in ["Loc.#", "Bldg."] else p_cov.get(key, "")
                     cell = tab2_sheet.cell(row=row_idx, column=j, value=self._stringify(val))
                     cell.border = thin_border
                     cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-                
+
                 # Current term data
                 for j, key in enumerate(coverage_headers, start=10):
                     val = c_cov.get(key.replace(".", "#"), "") if key in ["Loc.#", "Bldg."] else c_cov.get(key, "")
                     cell = tab2_sheet.cell(row=row_idx, column=j, value=self._stringify(val))
                     cell.border = thin_border
                     cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-                
+
                 # Status
                 status = "MATCHES" if p_cov == c_cov else "DOESN'T MATCH"
                 cell = tab2_sheet.cell(row=row_idx, column=19, value=status)
                 cell.border = thin_border
                 cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-                
+
                 row_idx += 1
-            
+
             # Add a few blank rows
             for _ in range(3):
                 for j in range(1, 20):
                     tab2_sheet.cell(row=row_idx, column=j, value="").border = thin_border
                 row_idx += 1
-            
+
             # Create section header for blanket coverages
             tab2_sheet.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=18)
             cell = tab2_sheet.cell(row=row_idx, column=1, value="COMMERCIAL PROPERTY BLANKET COVERAGES")
@@ -1878,9 +1928,9 @@ Ensure that all coverage details are fully captured without omission.
             cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
             cell.border = thin_border
             tab2_sheet.cell(row=row_idx, column=19, value="").border = thin_border
-            
+
             row_idx += 1
-            
+
             # Create column headers for blanket coverages (same as location specific)
             for j, header in enumerate(coverage_headers, start=1):
                 cell = tab2_sheet.cell(row=row_idx, column=j, value=header)
@@ -1888,35 +1938,35 @@ Ensure that all coverage details are fully captured without omission.
                 cell.fill = blue_fill
                 cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
                 cell.border = thin_border
-            
+
             for j, header in enumerate(coverage_headers, start=10):
                 cell = tab2_sheet.cell(row=row_idx, column=j, value=header)
                 cell.font = header_font
                 cell.fill = blue_fill
                 cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
                 cell.border = thin_border
-            
+
             cell = tab2_sheet.cell(row=row_idx, column=19, value="")
             cell.border = thin_border
-            
+
             row_idx += 1
-            
+
             # Add a few blank rows for blanket coverages
             for _ in range(5):
                 for j in range(1, 20):
                     tab2_sheet.cell(row=row_idx, column=j, value="").border = thin_border
                 row_idx += 1
-            
+
             # Set column widths
             col_widths = {
                 1: 8, 2: 8, 3: 25, 4: 12, 5: 10, 6: 15, 7: 15, 8: 10, 9: 10,
                 10: 8, 11: 8, 12: 25, 13: 12, 14: 10, 15: 15, 16: 15, 17: 10, 18: 10, 19: 15
             }
-            
+
             for col_i, width in col_widths.items():
                 col_letter = chr(64 + col_i) if col_i <= 26 else chr(64 + col_i // 26) + chr(64 + col_i % 26)
                 tab2_sheet.column_dimensions[col_letter].width = width
-            
+
             workbook.save(self.excel_path)
             return True
         except Exception as e:
@@ -2086,8 +2136,9 @@ class ExcelViewerWindow(QMainWindow):
 # Welcome Page
 # ---------------------------
 class WelcomePage(QMainWindow):
-    def __init__(self):
+    def __init__(self, email=None): # Modified line
         super().__init__()
+        self.user_email = email # Add this line
         self.setWindowTitle("Marble Box - Welcome")
         self.setGeometry(100, 100, 800, 600)
         if os.path.exists("temp/icon.png"):
@@ -2164,9 +2215,10 @@ class WelcomePage(QMainWindow):
         self.business_combo.setStyleSheet(f"""
             QComboBox {{
                 background-color: white;
-                padding: 8px; 
-                font-size: 14px; 
+                padding: 8px;
+                font-size: 14px;
                 border: 1px solid {COLORS['login_disabled']};
+                border-radius: 5px;
             }}
             QComboBox QAbstractItemView {{
                 background-color: white;
@@ -2190,9 +2242,10 @@ class WelcomePage(QMainWindow):
         self.lob_combo.setStyleSheet(f"""
             QComboBox {{
                 background-color: white;
-                padding: 8px; 
-                font-size: 14px; 
+                padding: 8px;
+                font-size: 14px;
                 border: 1px solid {COLORS['login_disabled']};
+                border-radius: 5px;
             }}
             QComboBox QAbstractItemView {{
                 background-color: white;
@@ -2210,26 +2263,27 @@ class WelcomePage(QMainWindow):
         dropdown_layout.addWidget(self.lob_combo)
 
         self.proceed_button = QPushButton("  Proceed")
-        self.proceed_button.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {COLORS['login_primary']};
-                color: white;
-                padding: 10px;
-                border-radius: 5px;
-                font-size: 16px;
-            }}
-            QPushButton:hover {{
-                background-color: {COLORS['login_accent']};
-            }}
-        """)
+        self.proceed_button.setStyleSheet(get_primary_button_style()) # Use helper
         if os.path.exists("temp/icon.png"):
             self.proceed_button.setIcon(QIcon("temp/icon.png"))
             self.proceed_button.setIconSize(QSize(20, 20))
         self.proceed_button.clicked.connect(self.on_proceed)
         dropdown_layout.addWidget(self.proceed_button)
 
+        self.profile_button = QPushButton("User Profile")
+        self.profile_button.setStyleSheet(get_accent_button_style()) # Use helper
+        self.profile_button.clicked.connect(self.open_user_profile)
+        dropdown_layout.addWidget(self.profile_button)
+
         main_layout.addWidget(dropdown_frame)
         main_layout.addSpacerItem(QSpacerItem(20, 20, QSizePolicy.Minimum, QSizePolicy.Expanding))
+
+    def open_user_profile(self):
+        if self.user_email:
+            profile_dialog = UserProfileDialog(self.user_email, parent=self)
+            profile_dialog.exec_()
+        else:
+            QMessageBox.warning(self, "Error", "User email not found. Cannot open profile.")
 
     def on_business_selected(self, index):
         if index <= 0:
@@ -2242,12 +2296,12 @@ class WelcomePage(QMainWindow):
             self.lob_combo.clear()
             self.lob_combo.addItem("-- Select an LOB --")
 
-            if self.selected_business.upper() == "PERSONAL LINE":
-                folder = SHAREDRIVE_PERSONAL
-            elif self.selected_business.upper() == "COMMERCIAL LINE":
-                folder = SHAREDRIVE_COMMERCIAL
-            else:
-                folder = None
+            folder_map = {
+                "PERSONAL LINE": SHAREDRIVE_PERSONAL,
+                "COMMERCIAL LINE": SHAREDRIVE_COMMERCIAL
+            }
+            selected_upper = self.selected_business.upper()
+            folder = folder_map.get(selected_upper)
 
             if folder and os.path.exists(folder):
                 lob_names_found = set()
@@ -2267,17 +2321,14 @@ class WelcomePage(QMainWindow):
         self.open_pdf_comparison()
 
     def open_pdf_comparison(self):
-        self.pdf_tool = PDFComparisonTool(self.business_combo.currentText(), self.lob_combo.currentText())
+        self.pdf_tool = PDFComparisonTool(self.business_combo.currentText(), self.lob_combo.currentText(), user_email=self.user_email)
         self.pdf_tool.show()
         self.close()
 
     def go_back(self):
-        from_index = __import__("__main__").login_window
-        if from_index:
-            from_index.show()
-        else:
-            self.login_window = LoginWindow()
-            self.login_window.show()
+        # Ensure self.user_email is passed back if needed, or handle re-login
+        self.welcome_page = WelcomePage(email=self.user_email) # Pass email back
+        self.welcome_page.show()
         self.close()
 
     def logout(self):
@@ -2289,8 +2340,9 @@ class WelcomePage(QMainWindow):
 # Enhanced PDFComparisonTool
 # ---------------------------
 class PDFComparisonTool(QMainWindow):
-    def __init__(self, business_type, lob_name):
+    def __init__(self, business_type, lob_name, user_email=None):
         super().__init__()
+        self.user_email = user_email
         self.business_type = business_type
         self.lob_name = lob_name
         self.field_definitions = load_parameters_from_file(self.business_type, self.lob_name)
@@ -2430,10 +2482,12 @@ class PDFComparisonTool(QMainWindow):
                 border-radius: 5px;
                 text-align: center;
                 height: 25px;
+                color: {COLORS['text']};
             }}
             QProgressBar::chunk {{
                 background-color: {COLORS['progress']};
-                width: 20px;
+                width: 10px;
+                margin: 0.5px;
             }}
         """)
         frame_layout.addWidget(self.progress_bar)
@@ -2441,7 +2495,7 @@ class PDFComparisonTool(QMainWindow):
         main_layout.addWidget(frame)
 
         footer_label = QLabel('©(2025) Marble Box . All Rights Reserved - Enhanced Version')
-        footer_label.setStyleSheet(f"color: {COLORS['text']}; font-size: 12px; margin-top: 10px;")
+        footer_label.setStyleSheet(f"color: {COLORS['text']}; font-size: 10px; margin-top: 10px;")
         footer_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(footer_label)
 
@@ -2455,7 +2509,8 @@ class PDFComparisonTool(QMainWindow):
         self.compare_button.setEnabled(False)
 
     def go_back(self):
-        self.welcome_page = WelcomePage()
+        # Ensure self.user_email is passed back if needed, or handle re-login
+        self.welcome_page = WelcomePage(email=self.user_email) # Pass email back
         self.welcome_page.show()
         self.close()
 
@@ -2520,15 +2575,19 @@ class PDFComparisonTool(QMainWindow):
             self.progress_bar.setValue(100)
             QMessageBox.information(self, 'Success', 'PDF comparison with enhanced OCR completed successfully!')
             self.view_excel_button.setEnabled(True)
-            
+
             # Send completion email notification
-            try:
-                subject = "PDF Comparison Completed"
-                body = f"Your PDF comparison for {self.lob_name} has been completed successfully.\n\nResults have been saved to: {self.excel_path}"
-                # Note: You would need to get the user's email from the login system
-                # send_email("user@example.com", subject, body, [self.excel_path])
-            except Exception as e:
-                logging.error(f"Failed to send completion email: {e}")
+        # Modified block:
+        try:
+            subject = "PDF Comparison Completed"
+            body = f"Your PDF comparison for {self.lob_name} has been completed successfully.\n\nResults have been saved to: {self.excel_path}"
+            if self.user_email:
+                send_email(self.user_email, subject, body, [self.excel_path])
+                logging.info(f"Sent comparison completion email to {self.user_email}")
+            else:
+                logging.warning("No user email found; cannot send comparison completion email.")
+        except Exception as e:
+            logging.error(f"Failed to send completion email: {e}")
 
     def open_excel_viewer(self):
         if self.excel_path and os.path.exists(self.excel_path):
@@ -2639,7 +2698,7 @@ class LoginWindow(QMainWindow):
 
         self.email_input = QLineEdit()
         self.email_input.setPlaceholderText("Enter your email")
-        self.email_input.setStyleSheet(f"padding: 8px; font-size: 14px; border: 1px solid {COLORS['login_disabled']};")
+        self.email_input.setStyleSheet(get_input_field_style())
         stored_email = self.settings.value("rememberedEmail", "")
         if stored_email:
             self.email_input.setText(stored_email)
@@ -2648,7 +2707,7 @@ class LoginWindow(QMainWindow):
         self.password_input = QLineEdit()
         self.password_input.setPlaceholderText("Enter your password")
         self.password_input.setEchoMode(QLineEdit.Password)
-        self.password_input.setStyleSheet(f"padding: 8px; font-size: 14px; border: 1px solid {COLORS['login_disabled']};")
+        self.password_input.setStyleSheet(get_input_field_style())
         layout.addWidget(self.password_input)
 
         self.remember_checkbox = QCheckBox("Remember me")
@@ -2658,36 +2717,45 @@ class LoginWindow(QMainWindow):
         layout.addWidget(self.remember_checkbox)
 
         login_button = QPushButton("Login")
-        login_button.setStyleSheet(f"background-color: {COLORS['login_primary']}; color: white; padding: 10px;")
+        login_button.setStyleSheet(get_primary_button_style())
         login_button.setAutoDefault(True)
         login_button.setDefault(True)
         login_button.clicked.connect(self.login)
         layout.addWidget(login_button)
 
         forgot_button = QPushButton("Forgot Password?")
-        forgot_button.setStyleSheet(f"background-color: transparent; color: {COLORS['login_alert']}; text-decoration: underline;")
+        forgot_button.setStyleSheet(f"background-color: transparent; color: {COLORS['login_alert']}; text-decoration: underline; font-size: 12px;") # Keep specific style
         forgot_button.clicked.connect(self.forgot_password)
         layout.addWidget(forgot_button)
 
         signup_button = QPushButton("Sign Up")
-        signup_button.setStyleSheet(f"background-color: {COLORS['login_secondary']}; color: white; padding: 10px;")
+        signup_button.setStyleSheet(get_secondary_button_style())
         signup_button.clicked.connect(self.open_signup)
         layout.addWidget(signup_button)
 
     def login(self):
         email = self.email_input.text().strip()
-        password = self.password_input.text().strip()
-        if not email or not password:
+        password_plain = self.password_input.text().strip()
+        if not email or not password_plain:
             QMessageBox.warning(self, "Error", "Please enter both email and password.")
             return
-        users = load_users()
-        if email in users and users[email]["password"] == password:
-            QMessageBox.information(self, "Success", "Login successful!")
-            if self.remember_checkbox.isChecked():
+        users = load_users() # Ensure users is loaded
+        if email in users:
+            stored_password_hash = users[email]["password"].encode('utf-8')
+            if bcrypt.checkpw(password_plain.encode('utf-8'), stored_password_hash):
+                # Passwords match
+                QMessageBox.information(self, "Success", "Login successful!")
+                if self.remember_checkbox.isChecked():
+                    self.settings.setValue("rememberedEmail", email)
+            else:
+                QMessageBox.critical(self, "Error", "Invalid email or password.")
+        else:
+            QMessageBox.critical(self, "Error", "Invalid email or password.") # User not found
+            if self.remember_checkbox.isChecked(): # This block seems misplaced, should be inside successful login
                 self.settings.setValue("rememberedEmail", email)
             else:
                 self.settings.remove("rememberedEmail")
-            
+
             # Send login notification email
             try:
                 subject = "Marble Box Login Notification"
@@ -2695,10 +2763,10 @@ class LoginWindow(QMainWindow):
                 send_email(email, subject, body)
             except Exception as e:
                 logging.error(f"Failed to send login notification: {e}")
-            
+
             self.open_welcome_page()
-        else:
-            QMessageBox.critical(self, "Error", "Invalid email or password.")
+        # else: # This else is for "if email in users:"
+            # QMessageBox.critical(self, "Error", "Invalid email or password.") # Already handled
 
     def forgot_password(self):
         email = self.email_input.text().strip()
@@ -2713,19 +2781,19 @@ class LoginWindow(QMainWindow):
         QMessageBox.information(self, "Reset Password", f"A reset code has been sent to your email.\nTemporary Code: {temp_code}")
         subject = "Marble Box Password Reset Code"
         body = f"Hello,\n\nYour reset code is: {temp_code}\n\nUse this code to reset your password.\n\nRegards,\nMarble Box Team"
-        
+
         # Enhanced email sending with progress feedback
         email_thread = send_email(email, subject, body)
-        
+
         def on_email_sent(success, error):
             if success:
                 logging.info("Password reset email sent successfully")
             else:
                 logging.error(f"Failed to send password reset email: {error}")
                 QMessageBox.warning(self, "Email Error", f"Failed to send reset email: {error}")
-        
+
         email_thread.finished_signal.connect(on_email_sent)
-        
+
         dlg = ResetPasswordDialog(email, temp_code)
         dlg.exec_()
 
@@ -2739,7 +2807,7 @@ class LoginWindow(QMainWindow):
         msg_box.setText("Access to SharePoint and share drive granted 😀\nEnhanced OCR and Email System Active")
         QTimer.singleShot(2000, msg_box.accept)
         msg_box.exec_()
-        self.welcome_page = WelcomePage()
+        self.welcome_page = WelcomePage(email=self.email_input.text().strip())
         self.welcome_page.show()
         self.close()
 
@@ -2757,10 +2825,11 @@ class SignupDialog(QDialog):
         layout = QFormLayout(self)
         self.email_input = QLineEdit()
         self.email_input.setPlaceholderText("Enter your email")
+        self.email_input.setStyleSheet(get_input_field_style())
         layout.addRow("Email:", self.email_input)
 
         signup_button = QPushButton("Register")
-        signup_button.setStyleSheet(f"background-color: {COLORS['login_secondary']}; color: white; padding: 8px;")
+        signup_button.setStyleSheet(get_secondary_button_style())
         signup_button.clicked.connect(self.register)
         layout.addRow(signup_button)
 
@@ -2778,10 +2847,10 @@ class SignupDialog(QDialog):
         QMessageBox.information(self, "Registration", f"A temporary password has been sent to your email.\nTemporary Password: {temp_password}")
         subject = "Marble Box Registration - Temporary Password"
         body = f"Hello,\n\nThank you for registering with Marble Box Enhanced PDF Comparison Tool.\nYour temporary password is: {temp_password}\n\nUse this to complete your registration.\n\nRegards,\nMarble Box Team"
-        
+
         # Enhanced email sending
         email_thread = send_email(email, subject, body)
-        
+
         def on_email_sent(success, error):
             if success:
                 logging.info("Registration email sent successfully")
@@ -2790,7 +2859,7 @@ class SignupDialog(QDialog):
             else:
                 logging.error(f"Failed to send registration email: {error}")
                 QMessageBox.critical(self, "Email Error", f"Failed to send registration email: {error}")
-        
+
         email_thread.finished_signal.connect(on_email_sent)
         self.close()
 
@@ -2810,50 +2879,54 @@ class CompleteRegistrationDialog(QDialog):
         layout = QFormLayout(self)
         self.temp_input = QLineEdit()
         self.temp_input.setPlaceholderText("Enter temporary password")
+        self.temp_input.setStyleSheet(get_input_field_style())
         layout.addRow("Temporary Password:", self.temp_input)
 
         self.new_password_input = QLineEdit()
         self.new_password_input.setPlaceholderText("Enter new password")
         self.new_password_input.setEchoMode(QLineEdit.Password)
+        self.new_password_input.setStyleSheet(get_input_field_style())
         layout.addRow("New Password:", self.new_password_input)
 
         self.confirm_password_input = QLineEdit()
         self.confirm_password_input.setPlaceholderText("Confirm new password")
         self.confirm_password_input.setEchoMode(QLineEdit.Password)
+        self.confirm_password_input.setStyleSheet(get_input_field_style())
         layout.addRow("Confirm Password:", self.confirm_password_input)
 
         complete_button = QPushButton("Complete Registration")
-        complete_button.setStyleSheet(f"background-color: {COLORS['login_primary']}; color: white; padding: 8px;")
+        complete_button.setStyleSheet(get_primary_button_style())
         complete_button.clicked.connect(self.complete_registration)
         layout.addRow(complete_button)
 
     def complete_registration(self):
         temp_entered = self.temp_input.text().strip()
-        new_password = self.new_password_input.text().strip()
+        new_password_plain = self.new_password_input.text().strip()
         confirm_password = self.confirm_password_input.text().strip()
 
         if temp_entered != self.temp_password:
             QMessageBox.critical(self, "Error", "Temporary password does not match.")
             return
-        if not new_password or new_password != confirm_password:
+        if not new_password_plain or new_password_plain != confirm_password:
             QMessageBox.critical(self, "Error", "Passwords do not match or are empty.")
             return
 
         users = load_users()
-        users[self.email] = {"password": new_password, "verified": True}
+        hashed_password = bcrypt.hashpw(new_password_plain.encode('utf-8'), bcrypt.gensalt())
+        users[self.email] = {"password": hashed_password.decode('utf-8'), "verified": True} # Store as string
         save_users(users)
 
         QMessageBox.information(self, "Success", "Registration completed. You can now log in.")
         subject = "Marble Box Registration Completed"
         body = f"Hello,\n\nYour registration for the Enhanced Marble Box PDF Comparison Tool is now complete. You can log in with your new password.\n\nRegards,\nMarble Box Team"
-        
+
         # Enhanced email sending
         email_thread = send_email(self.email, subject, body)
-        
+
         def on_email_sent(success, error):
             if not success:
                 logging.error(f"Failed to send completion email: {error}")
-        
+
         email_thread.finished_signal.connect(on_email_sent)
         self.close()
 
@@ -2873,50 +2946,54 @@ class ResetPasswordDialog(QDialog):
         layout = QFormLayout(self)
         self.code_input = QLineEdit()
         self.code_input.setPlaceholderText("Enter reset code")
+        self.code_input.setStyleSheet(get_input_field_style())
         layout.addRow("Reset Code:", self.code_input)
 
         self.new_password_input = QLineEdit()
         self.new_password_input.setPlaceholderText("Enter new password")
         self.new_password_input.setEchoMode(QLineEdit.Password)
+        self.new_password_input.setStyleSheet(get_input_field_style())
         layout.addRow("New Password:", self.new_password_input)
 
         self.confirm_password_input = QLineEdit()
         self.confirm_password_input.setPlaceholderText("Confirm new password")
         self.confirm_password_input.setEchoMode(QLineEdit.Password)
+        self.confirm_password_input.setStyleSheet(get_input_field_style())
         layout.addRow("Confirm Password:", self.confirm_password_input)
 
         reset_button = QPushButton("Reset Password")
-        reset_button.setStyleSheet(f"background-color: {COLORS['login_primary']}; color: white; padding: 8px;")
+        reset_button.setStyleSheet(get_primary_button_style())
         reset_button.clicked.connect(self.reset_password)
         layout.addRow(reset_button)
 
     def reset_password(self):
         code_entered = self.code_input.text().strip()
-        new_password = self.new_password_input.text().strip()
+        new_password_plain = self.new_password_input.text().strip()
         confirm_password = self.confirm_password_input.text().strip()
 
         if code_entered != self.temp_code:
             QMessageBox.critical(self, "Error", "Reset code does not match.")
             return
-        if not new_password or new_password != confirm_password:
+        if not new_password_plain or new_password_plain != confirm_password:
             QMessageBox.critical(self, "Error", "Passwords do not match or are empty.")
             return
 
         users = load_users()
         if self.email in users:
-            users[self.email]["password"] = new_password
+            hashed_password = bcrypt.hashpw(new_password_plain.encode('utf-8'), bcrypt.gensalt())
+            users[self.email]["password"] = hashed_password.decode('utf-8') # Store as string
             save_users(users)
             QMessageBox.information(self, "Success", "Password has been reset. A confirmation email has been sent.")
             subject = "Marble Box Password Reset Confirmation"
             body = f"Hello,\n\nYour password for the Enhanced Marble Box PDF Comparison Tool has been reset successfully.\n\nRegards,\nMarble Box Team"
-            
+
             # Enhanced email sending
             email_thread = send_email(self.email, subject, body)
-            
+
             def on_email_sent(success, error):
                 if not success:
                     logging.error(f"Failed to send confirmation email: {error}")
-            
+
             email_thread.finished_signal.connect(on_email_sent)
             self.close()
         else:
@@ -2931,55 +3008,67 @@ class EmailTestDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Email System Test")
         self.setGeometry(200, 200, 400, 300)
-        self.setStyleSheet(f"background-color: {COLORS['login_bg']};")
+        self.setStyleSheet(f"background-color: {COLORS['background']};") # Use general app background
         self.init_ui()
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
-        
+        layout = QFormLayout(self) # Changed to QFormLayout for better label-input alignment
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        label_style = get_dialog_label_style() # Use helper
+        input_style = get_dialog_input_style() # Use helper
+
         # Email input
+        email_label = QLabel("Test Email Address:")
+        email_label.setStyleSheet(label_style)
         self.email_input = QLineEdit()
         self.email_input.setPlaceholderText("Enter test email address")
-        layout.addWidget(QLabel("Test Email Address:"))
-        layout.addWidget(self.email_input)
-        
+        self.email_input.setStyleSheet(input_style)
+        layout.addRow(email_label, self.email_input)
+
         # Subject input
+        subject_label = QLabel("Subject:")
+        subject_label.setStyleSheet(label_style)
         self.subject_input = QLineEdit()
         self.subject_input.setText("Marble Box Email System Test")
-        layout.addWidget(QLabel("Subject:"))
-        layout.addWidget(self.subject_input)
-        
+        self.subject_input.setStyleSheet(input_style)
+        layout.addRow(subject_label, self.subject_input)
+
         # Message input
-        self.message_input = QLineEdit()
+        message_label = QLabel("Message:")
+        message_label.setStyleSheet(label_style)
+        self.message_input = QLineEdit() # Consider QPlainTextEdit for multi-line messages if needed
         self.message_input.setText("This is a test email from the enhanced Marble Box system.")
-        layout.addWidget(QLabel("Message:"))
-        layout.addWidget(self.message_input)
-        
+        self.message_input.setStyleSheet(input_style)
+        layout.addRow(message_label, self.message_input)
+
         # Send button
         send_button = QPushButton("Send Test Email")
-        send_button.setStyleSheet(f"background-color: {COLORS['login_primary']}; color: white; padding: 10px;")
+        send_button.setStyleSheet(get_dialog_button_style()) # Use helper
         send_button.clicked.connect(self.send_test_email)
-        layout.addWidget(send_button)
-        
+        layout.addRow(send_button) # AddRow will span it if only one widget
+
         # Status label
         self.status_label = QLabel("Ready to send test email")
-        self.status_label.setStyleSheet(f"color: {COLORS['login_primary']};")
-        layout.addWidget(self.status_label)
+        self.status_label.setStyleSheet(f"color: {COLORS['primary']}; font-size: 12px; margin-top: 10px;")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        layout.addRow(self.status_label)
 
     def send_test_email(self):
         email = self.email_input.text().strip()
         subject = self.subject_input.text().strip()
         message = self.message_input.text().strip()
-        
+
         if not email or not subject or not message:
             QMessageBox.warning(self, "Error", "Please fill in all fields.")
             return
-        
+
         self.status_label.setText("Sending test email...")
-        
+
         # Send test email
         email_thread = send_email(email, subject, message)
-        
+
         def on_email_sent(success, error):
             if success:
                 self.status_label.setText("Test email sent successfully!")
@@ -2987,14 +3076,142 @@ class EmailTestDialog(QDialog):
             else:
                 self.status_label.setText(f"Failed to send email: {error}")
                 QMessageBox.critical(self, "Error", f"Failed to send email: {error}")
-        
+
         def on_progress(message):
             self.status_label.setText(f"Progress: {message}")
-        
+
         email_thread.finished_signal.connect(on_email_sent)
         email_thread.progress_signal.connect(on_progress)
 
 # ---------------------------
+# UserProfileDialog Class
+# ---------------------------
+class UserProfileDialog(QDialog):
+    def __init__(self, user_email, parent=None):
+        super().__init__(parent)
+        self.user_email = user_email
+        self.setWindowTitle("User Profile")
+        self.setGeometry(200, 200, 400, 200)
+        self.setStyleSheet(f"background-color: {COLORS['background']};") # Use general app background
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20) # Add some margins
+        layout.setSpacing(15) # Add spacing between widgets
+
+        email_label = QLabel(f"Email: {self.user_email}")
+        email_label.setStyleSheet(f"color: {COLORS['primary']}; font-size: 16px; font-weight: bold;") # Use primary text color
+        layout.addWidget(email_label)
+
+        change_password_button = QPushButton("Change Password")
+        change_password_button.setStyleSheet(get_dialog_button_style(font_size="14px"))
+        change_password_button.clicked.connect(self.open_change_password_dialog)
+        layout.addWidget(change_password_button)
+
+        close_button = QPushButton("Close")
+        close_button.setStyleSheet(get_dialog_button_style(color_key='secondary', font_size="14px"))
+        close_button.clicked.connect(self.accept)
+        layout.addWidget(close_button)
+
+    def open_change_password_dialog(self):
+        change_password_dialog = ChangePasswordDialog(self.user_email, parent=self)
+        change_password_dialog.exec_()
+
+# ---------------------------
+# ChangePasswordDialog Class
+# ---------------------------
+class ChangePasswordDialog(QDialog):
+    def __init__(self, user_email, parent=None):
+        super().__init__(parent)
+        self.user_email = user_email
+        self.setWindowTitle("Change Password")
+        self.setGeometry(250, 250, 400, 300)
+        self.setStyleSheet(f"background-color: {COLORS['background']};") # Use general app background
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QFormLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+
+        label_style = get_dialog_label_style()
+        input_style = get_dialog_input_style()
+
+        current_pass_label = QLabel("Current Password:")
+        current_pass_label.setStyleSheet(label_style)
+        self.current_password_input = QLineEdit()
+        self.current_password_input.setPlaceholderText("Enter current password")
+        self.current_password_input.setEchoMode(QLineEdit.Password)
+        self.current_password_input.setStyleSheet(input_style)
+        layout.addRow(current_pass_label, self.current_password_input)
+
+        new_pass_label = QLabel("New Password:")
+        new_pass_label.setStyleSheet(label_style)
+        self.new_password_input = QLineEdit()
+        self.new_password_input.setPlaceholderText("Enter new password")
+        self.new_password_input.setEchoMode(QLineEdit.Password)
+        self.new_password_input.setStyleSheet(input_style)
+        layout.addRow(new_pass_label, self.new_password_input)
+
+        confirm_pass_label = QLabel("Confirm New Password:")
+        confirm_pass_label.setStyleSheet(label_style)
+        self.confirm_password_input = QLineEdit()
+        self.confirm_password_input.setPlaceholderText("Confirm new password")
+        self.confirm_password_input.setEchoMode(QLineEdit.Password)
+        self.confirm_password_input.setStyleSheet(input_style)
+        layout.addRow(confirm_pass_label, self.confirm_password_input)
+
+        submit_button = QPushButton("Change Password")
+        submit_button.setStyleSheet(get_dialog_button_style(font_size="14px"))
+        submit_button.clicked.connect(self.attempt_password_change)
+
+        cancel_button = QPushButton("Cancel")
+        cancel_button.setStyleSheet(get_dialog_button_style(color_key='secondary', font_size="14px"))
+        cancel_button.clicked.connect(self.reject)
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        button_layout.addWidget(cancel_button)
+        button_layout.addWidget(submit_button)
+        layout.addRow(button_layout)
+
+
+    def attempt_password_change(self):
+        current_password_plain = self.current_password_input.text().strip()
+        new_password_plain = self.new_password_input.text().strip()
+        confirm_password_plain = self.confirm_password_input.text().strip()
+
+        if not current_password_plain or not new_password_plain or not confirm_password_plain:
+            QMessageBox.warning(self, "Error", "All fields are required.")
+            return
+
+        if new_password_plain != confirm_password_plain:
+            QMessageBox.warning(self, "Error", "New passwords do not match.")
+            return
+
+        users = load_users()
+        if self.user_email not in users:
+            QMessageBox.critical(self, "Error", "User email not found. This should not happen.")
+            return
+
+        stored_password_hash_str = users[self.user_email].get("password")
+        if not stored_password_hash_str:
+            QMessageBox.critical(self, "Error", "Stored password not found for user.")
+            return
+
+        stored_password_hash = stored_password_hash_str.encode('utf-8')
+
+        if bcrypt.checkpw(current_password_plain.encode('utf-8'), stored_password_hash):
+            new_hashed_password = bcrypt.hashpw(new_password_plain.encode('utf-8'), bcrypt.gensalt())
+            users[self.user_email]["password"] = new_hashed_password.decode('utf-8')
+            save_users(users)
+            QMessageBox.information(self, "Success", "Password changed successfully.")
+            self.accept()  # Close the dialog
+        else:
+            QMessageBox.warning(self, "Error", "Incorrect current password.")
+
+
 # Main Application with Enhanced Features
 # ---------------------------
 login_window = None
@@ -3003,24 +3220,24 @@ def main():
     try:
         app = QApplication(sys.argv)
         app.setStyle("Fusion")
-        
+
         # Create temp directory for resources
         os.makedirs("temp", exist_ok=True)
-        
+
         # Download and cache resources
         try:
             if not os.path.exists("temp/logo.png"):
                 response = requests.get(LOGO_URL)
                 with open("temp/logo.png", "wb") as f:
                     f.write(response.content)
-            
+
             if not os.path.exists("temp/icon.png"):
                 response = requests.get(ICON_URL)
                 with open("temp/icon.png", "wb") as f:
                     f.write(response.content)
         except Exception as e:
             logging.warning(f"Failed to download resources: {e}")
-        
+
         # Show splash screen
         splash = SplashScreen()
         splash.show()
@@ -3033,20 +3250,20 @@ def main():
             splash.close()
 
         QTimer.singleShot(3000, on_splash_finished)
-        
+
         # Add menu for email testing (for debugging)
         def show_email_test():
             email_test = EmailTestDialog()
             email_test.exec_()
-        
+
         # You can add this to the main window menu if needed
         # main_window.menuBar().addAction("Test Email", show_email_test)
-        
+
         logging.info("Enhanced Marble Box PDF Comparison Tool started successfully")
         logging.info("Features: Enhanced OCR, Improved Email System, Better Error Handling")
-        
+
         sys.exit(app.exec_())
-        
+
     except Exception as e:
         logging.error(f"Application error: {str(e)}")
         if 'app' in locals():
