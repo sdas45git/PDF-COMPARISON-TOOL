@@ -6,13 +6,6 @@ import string
 import smtplib
 import ssl
 import fitz  # PyMuPDF
-import cv2
-import numpy as np
-import pytesseract
-from PIL import Image, ImageEnhance, ImageFilter
-import io
-import base64
-
 # Suppress MuPDF error messages to keep the terminal clean
 fitz.TOOLS.mupdf_display_errors(False)
 
@@ -35,10 +28,6 @@ from datetime import datetime
 import time
 import logging
 import concurrent.futures
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -79,20 +68,6 @@ SHAREDRIVE_COMMERCIAL = os.path.join(SHAREDRIVE_FOLDER, "Commercial Line")
 SHAREDRIVE_PERSONAL = os.path.join(SHAREDRIVE_FOLDER, "Personal Line")
 
 # ---------------------------
-# Enhanced Email Configuration
-# ---------------------------
-EMAIL_CONFIG = {
-    'smtp_server': 'smtp.office365.com',
-    'smtp_port': 587,
-    'sender_email': 'noreply_automation@marblebox.com',
-    'sender_password': 'M@rbleb0x@bfg642025$',
-    'use_tls': True,
-    'timeout': 30,
-    'retry_attempts': 3,
-    'retry_delay': 2
-}
-
-# ---------------------------
 # Global variable for Email Threads
 # ---------------------------
 email_threads = []
@@ -117,266 +92,46 @@ def generate_temp_code(length=6):
     return ''.join(random.choices(string.digits, k=length))
 
 # ---------------------------
-# Enhanced Email Sending (in a separate thread)
+# Email Sending (in a separate thread)
 # ---------------------------
 class EmailThread(QThread):
     finished_signal = pyqtSignal(bool, str)  # success, error_message
-    progress_signal = pyqtSignal(str)  # status message
 
-    def __init__(self, recipient, subject, body, attachments=None, parent=None):
+    def __init__(self, recipient, subject, body, parent=None):
         super().__init__(parent)
         self.recipient = recipient
         self.subject = subject
         self.body = body
-        self.attachments = attachments or []
-        self.config = EMAIL_CONFIG
+        self.smtp_server = "smtp.office365.com"
+        self.smtp_port = 587
+        self.sender_email = "noreply_automation@marblebox.com"
+        self.sender_password = "M@rbleb0x@Abc123MB@"
 
     def run(self):
-        """Enhanced email sending with better error handling and retry logic"""
-        for attempt in range(self.config['retry_attempts']):
-            try:
-                self.progress_signal.emit(f"Attempting to send email (attempt {attempt + 1}/{self.config['retry_attempts']})...")
-                
-                # Create message
-                msg = MIMEMultipart()
-                msg['From'] = self.config['sender_email']
-                msg['To'] = self.recipient
-                msg['Subject'] = self.subject
-                
-                # Add body
-                msg.attach(MIMEText(self.body, 'plain'))
-                
-                # Add attachments if any
-                for attachment_path in self.attachments:
-                    if os.path.exists(attachment_path):
-                        with open(attachment_path, "rb") as attachment:
-                            part = MIMEBase('application', 'octet-stream')
-                            part.set_payload(attachment.read())
-                            encoders.encode_base64(part)
-                            part.add_header(
-                                'Content-Disposition',
-                                f'attachment; filename= {os.path.basename(attachment_path)}'
-                            )
-                            msg.attach(part)
-                
-                # Create secure connection and send
-                context = ssl.create_default_context()
-                
-                self.progress_signal.emit("Connecting to SMTP server...")
-                with smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'], timeout=self.config['timeout']) as server:
-                    server.ehlo()
-                    
-                    if self.config['use_tls']:
-                        self.progress_signal.emit("Starting TLS encryption...")
-                        server.starttls(context=context)
-                        server.ehlo()
-                    
-                    self.progress_signal.emit("Authenticating...")
-                    server.login(self.config['sender_email'], self.config['sender_password'])
-                    
-                    self.progress_signal.emit("Sending email...")
-                    text = msg.as_string()
-                    server.sendmail(self.config['sender_email'], self.recipient, text)
-                    
-                self.progress_signal.emit("Email sent successfully!")
-                self.finished_signal.emit(True, "")
-                return
-                
-            except smtplib.SMTPAuthenticationError as e:
-                error_msg = f"SMTP Authentication failed: {str(e)}"
-                logging.error(error_msg)
-                if attempt == self.config['retry_attempts'] - 1:
-                    self.finished_signal.emit(False, error_msg)
-                    return
-                    
-            except smtplib.SMTPRecipientsRefused as e:
-                error_msg = f"Recipient refused: {str(e)}"
-                logging.error(error_msg)
-                self.finished_signal.emit(False, error_msg)
-                return
-                
-            except smtplib.SMTPServerDisconnected as e:
-                error_msg = f"SMTP server disconnected: {str(e)}"
-                logging.error(error_msg)
-                if attempt == self.config['retry_attempts'] - 1:
-                    self.finished_signal.emit(False, error_msg)
-                    return
-                    
-            except Exception as e:
-                error_msg = f"Email send error: {str(e)}"
-                logging.error(error_msg)
-                if attempt == self.config['retry_attempts'] - 1:
-                    self.finished_signal.emit(False, error_msg)
-                    return
-            
-            # Wait before retry
-            if attempt < self.config['retry_attempts'] - 1:
-                self.progress_signal.emit(f"Retrying in {self.config['retry_delay']} seconds...")
-                time.sleep(self.config['retry_delay'])
+        try:
+            context = ssl.create_default_context()
+            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
+                server.ehlo()
+                server.starttls(context=context)
+                server.ehlo()
+                server.login(self.sender_email, self.sender_password)
+                message = f"Subject: {self.subject}\n\n{self.body}"
+                server.sendmail(self.sender_email, self.recipient, message)
+            self.finished_signal.emit(True, "")
+        except Exception as e:
+            logging.error(f"Email send error: {str(e)}")
+            self.finished_signal.emit(False, str(e))
 
-def send_email(recipient, subject, body, attachments=None):
-    """Enhanced email sending function with better error handling"""
+def send_email(recipient, subject, body):
     global email_threads
-    thread = EmailThread(recipient, subject, body, attachments)
-    
+    thread = EmailThread(recipient, subject, body)
     def cleanup(success, error):
         if thread in email_threads:
             email_threads.remove(thread)
-        if not success:
-            logging.error(f"Email delivery failed: {error}")
-    
-    def progress_update(message):
-        logging.info(f"Email progress: {message}")
-    
     thread.finished_signal.connect(cleanup)
-    thread.progress_signal.connect(progress_update)
     email_threads.append(thread)
     thread.start()
     return thread
-
-# ---------------------------
-# Enhanced OCR Processing Class
-# ---------------------------
-class EnhancedOCR:
-    """Enhanced OCR class for better text extraction from challenging documents"""
-    
-    def __init__(self):
-        # Configure Tesseract if available
-        try:
-            # Try to find tesseract executable
-            if os.name == 'nt':  # Windows
-                possible_paths = [
-                    r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-                    r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-                    r'C:\Users\{}\AppData\Local\Tesseract-OCR\tesseract.exe'.format(os.getenv('USERNAME'))
-                ]
-                for path in possible_paths:
-                    if os.path.exists(path):
-                        pytesseract.pytesseract.tesseract_cmd = path
-                        break
-            
-            # Test if tesseract is working
-            pytesseract.get_tesseract_version()
-            self.tesseract_available = True
-            logging.info("Tesseract OCR is available and configured")
-        except Exception as e:
-            self.tesseract_available = False
-            logging.warning(f"Tesseract OCR not available: {e}")
-    
-    def preprocess_image(self, image):
-        """Apply various preprocessing techniques to improve OCR accuracy"""
-        try:
-            # Convert PIL image to OpenCV format
-            if isinstance(image, Image.Image):
-                opencv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-            else:
-                opencv_image = image
-            
-            # Convert to grayscale
-            gray = cv2.cvtColor(opencv_image, cv2.COLOR_BGR2GRAY)
-            
-            # Apply different preprocessing techniques
-            processed_images = []
-            
-            # Original grayscale
-            processed_images.append(('original', gray))
-            
-            # Gaussian blur + threshold
-            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-            _, thresh1 = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            processed_images.append(('gaussian_otsu', thresh1))
-            
-            # Adaptive threshold
-            adaptive_thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-            processed_images.append(('adaptive', adaptive_thresh))
-            
-            # Morphological operations
-            kernel = np.ones((2, 2), np.uint8)
-            morph = cv2.morphologyEx(thresh1, cv2.MORPH_CLOSE, kernel)
-            processed_images.append(('morphological', morph))
-            
-            # Dilation and erosion
-            dilated = cv2.dilate(thresh1, kernel, iterations=1)
-            eroded = cv2.erode(dilated, kernel, iterations=1)
-            processed_images.append(('dilate_erode', eroded))
-            
-            return processed_images
-            
-        except Exception as e:
-            logging.error(f"Error in image preprocessing: {e}")
-            return [('original', image)]
-    
-    def extract_text_with_ocr(self, image):
-        """Extract text using multiple OCR techniques"""
-        if not self.tesseract_available:
-            return ""
-        
-        try:
-            processed_images = self.preprocess_image(image)
-            best_text = ""
-            max_confidence = 0
-            
-            for name, processed_img in processed_images:
-                try:
-                    # Convert back to PIL Image for tesseract
-                    pil_img = Image.fromarray(processed_img)
-                    
-                    # Try different PSM modes
-                    psm_modes = [6, 8, 13, 3, 4]  # Different page segmentation modes
-                    
-                    for psm in psm_modes:
-                        try:
-                            custom_config = f'--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.,/$%()-: '
-                            
-                            # Get text with confidence
-                            data = pytesseract.image_to_data(pil_img, config=custom_config, output_type=pytesseract.Output.DICT)
-                            
-                            # Calculate average confidence
-                            confidences = [int(conf) for conf in data['conf'] if int(conf) > 0]
-                            if confidences:
-                                avg_confidence = sum(confidences) / len(confidences)
-                                text = pytesseract.image_to_string(pil_img, config=custom_config).strip()
-                                
-                                if avg_confidence > max_confidence and len(text) > len(best_text):
-                                    max_confidence = avg_confidence
-                                    best_text = text
-                                    logging.info(f"Better OCR result with {name} preprocessing, PSM {psm}, confidence: {avg_confidence:.2f}")
-                        
-                        except Exception as e:
-                            continue
-                
-                except Exception as e:
-                    logging.error(f"Error processing {name}: {e}")
-                    continue
-            
-            return best_text
-            
-        except Exception as e:
-            logging.error(f"Error in OCR text extraction: {e}")
-            return ""
-    
-    def enhance_image_quality(self, image):
-        """Enhance image quality for better OCR results"""
-        try:
-            if isinstance(image, np.ndarray):
-                image = Image.fromarray(image)
-            
-            # Increase contrast
-            enhancer = ImageEnhance.Contrast(image)
-            image = enhancer.enhance(1.5)
-            
-            # Increase sharpness
-            enhancer = ImageEnhance.Sharpness(image)
-            image = enhancer.enhance(2.0)
-            
-            # Apply unsharp mask
-            image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
-            
-            return image
-            
-        except Exception as e:
-            logging.error(f"Error enhancing image quality: {e}")
-            return image
 
 # ---------------------------
 # Field definitions (Default for Workers Compensation)
@@ -685,11 +440,10 @@ def load_parameters_from_file(business_type, lob_name):
     return FIELDS_TO_EXTRACT
 
 # ---------------------------
-# Enhanced PDF Processing Thread
+# PDF Processing Thread
 # ---------------------------
 class PDFProcessingThread(QThread):
     processing_done = pyqtSignal(dict, dict, str)
-    progress_update = pyqtSignal(str)
 
     def __init__(self, pdf1_path, pdf2_path, excel_path, field_definitions=None, parent=None):
         super().__init__(parent)
@@ -700,12 +454,9 @@ class PDFProcessingThread(QThread):
         genai.configure(api_key='AIzaSyDtpZPgzeiuuzCBjJgCoynp_b9ufSHt-A8')
         self.model = genai.GenerativeModel('gemini-1.5-flash')
         self.field_definitions = field_definitions if field_definitions is not None else FIELDS_TO_EXTRACT
-        self.enhanced_ocr = EnhancedOCR()
 
     def run(self):
         try:
-            self.progress_update.emit("Starting PDF processing...")
-            
             if isinstance(self.field_definitions, dict):
                 # Distinguish whether this is a CGL route vs. CRPO route vs. generic route vs. default workers comp
                 if "TAB1" in self.field_definitions and "TAB2" in self.field_definitions and "PARAMETERS" in self.field_definitions["TAB2"]:
@@ -718,7 +469,6 @@ class PDFProcessingThread(QThread):
                     
                     if is_crpo:
                         # This is CRPO route
-                        self.progress_update.emit("Processing CRPO documents...")
                         data1 = self.upload_and_query_pdf_crpo(self.pdf1_path)
                         if not data1:
                             raise Exception("Failed to process first PDF")
@@ -730,7 +480,6 @@ class PDFProcessingThread(QThread):
                             raise Exception("Failed to export results to Excel for CRPO")
                     else:
                         # This is CGL route
-                        self.progress_update.emit("Processing CGL documents...")
                         data1 = self.upload_and_query_pdf_cgl(self.pdf1_path)
                         if not data1:
                             raise Exception("Failed to process first PDF")
@@ -742,7 +491,6 @@ class PDFProcessingThread(QThread):
                             raise Exception("Failed to export results to Excel for CGL")
                 elif "excel_config" in self.field_definitions:
                     # Generic LOB route using dynamic JSON configuration
-                    self.progress_update.emit("Processing generic LOB documents...")
                     data1 = self.upload_and_query_pdf(self.pdf1_path)
                     if not data1:
                         raise Exception("Failed to process first PDF")
@@ -754,7 +502,6 @@ class PDFProcessingThread(QThread):
                         raise Exception("Failed to export results to Excel for Generic LOB")
                 else:
                     # Workers Comp route
-                    self.progress_update.emit("Processing Workers Compensation documents...")
                     data1 = self.upload_and_query_pdf(self.pdf1_path)
                     if not data1:
                         raise Exception("Failed to process first PDF")
@@ -766,69 +513,36 @@ class PDFProcessingThread(QThread):
                         raise Exception("Failed to export results to Excel")
             else:
                 raise Exception("Invalid field definitions format")
-            
-            self.progress_update.emit("Processing completed successfully!")
             self.processing_done.emit(data1, data2, "")
         except Exception as e:
-            self.progress_update.emit(f"Error: {str(e)}")
             self.processing_done.emit({}, {}, str(e))
 
     def extract_text_from_pdf(self, file_path):
-        """Enhanced text extraction with OCR fallback for challenging documents"""
         try:
-            self.progress_update.emit(f"Extracting text from {os.path.basename(file_path)}...")
-            
             doc = fitz.open(file_path)
             pages = list(doc)
             max_workers = (os.cpu_count() or 4) * 16
-            
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                results = list(executor.map(self.process_page_enhanced, pages))
-            
+                results = list(executor.map(self.process_page, pages))
             text_by_page = [res[0] for res in results]
             tables_by_page = []
             for res in results:
                 tables_by_page.extend(res[1])
-            
             doc.close()
-            
-            # Combine all text
-            combined_text = "\n".join(text_by_page)
-            
-            # If text extraction was poor, try OCR on the entire document
-            if len(combined_text.strip()) < 100:  # Very little text extracted
-                self.progress_update.emit("Text extraction was limited, applying OCR...")
-                ocr_text = self.apply_ocr_to_pdf(file_path)
-                if len(ocr_text) > len(combined_text):
-                    combined_text = ocr_text
-                    logging.info("OCR provided better text extraction results")
-            
-            return {'text': combined_text, 'tables': tables_by_page}
-            
+            return {'text': "\n".join(text_by_page), 'tables': tables_by_page}
         except Exception as e:
             logging.error(f"Error extracting text from PDF: {e}")
-            # Fallback to OCR if regular extraction fails
-            try:
-                self.progress_update.emit("Fallback to OCR processing...")
-                ocr_text = self.apply_ocr_to_pdf(file_path)
-                return {'text': ocr_text, 'tables': []}
-            except Exception as ocr_error:
-                logging.error(f"OCR fallback also failed: {ocr_error}")
-                return {'text': '', 'tables': []}
+            return {'text': '', 'tables': []}
 
-    def process_page_enhanced(self, page):
-        """Enhanced page processing with OCR fallback"""
+    def process_page(self, page):
         try:
-            # Try regular text extraction first
             try:
                 text_dict = page.get_text("dict", sort=True)
             except Exception as e:
                 logging.error(f"Page text extraction error: {e}")
                 text_dict = {"blocks": []}
-            
             blocks = text_dict.get("blocks", [])
             blocks.sort(key=lambda b: (b.get("bbox", [0, 0])[1], b.get("bbox", [0, 0])[0]))
-            
             page_text = []
             current_section = []
             last_y = None
@@ -861,33 +575,9 @@ class PDFProcessingThread(QThread):
                     last_y = current_y
                     last_font = current_font
                     last_size = current_size
-            
             if current_section:
                 page_text.append(" ".join(current_section))
 
-            extracted_text = "\n".join(page_text)
-            
-            # If very little text was extracted, try OCR on this page
-            if len(extracted_text.strip()) < 50:
-                try:
-                    # Get page as image
-                    mat = fitz.Matrix(2.0, 2.0)  # Higher resolution
-                    pix = page.get_pixmap(matrix=mat)
-                    img_data = pix.tobytes("png")
-                    
-                    # Convert to PIL Image
-                    image = Image.open(io.BytesIO(img_data))
-                    
-                    # Apply OCR
-                    ocr_text = self.enhanced_ocr.extract_text_with_ocr(image)
-                    if len(ocr_text.strip()) > len(extracted_text.strip()):
-                        extracted_text = ocr_text
-                        logging.info(f"OCR improved text extraction for page")
-                
-                except Exception as e:
-                    logging.error(f"OCR processing failed for page: {e}")
-
-            # Extract tables
             tables_by_page = []
             try:
                 found_tables = page.find_tables(
@@ -920,43 +610,10 @@ class PDFProcessingThread(QThread):
                 else:
                     logging.error(f"Table extraction error on page: {e}")
 
-            return (extracted_text, tables_by_page)
-            
+            return ("\n".join(page_text), tables_by_page)
         except Exception as e:
             logging.error(f"Error processing page: {e}")
             return ("", [])
-
-    def apply_ocr_to_pdf(self, file_path):
-        """Apply OCR to entire PDF document"""
-        try:
-            doc = fitz.open(file_path)
-            all_text = []
-            
-            for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                
-                # Convert page to high-resolution image
-                mat = fitz.Matrix(3.0, 3.0)  # High resolution for better OCR
-                pix = page.get_pixmap(matrix=mat)
-                img_data = pix.tobytes("png")
-                
-                # Convert to PIL Image
-                image = Image.open(io.BytesIO(img_data))
-                
-                # Enhance image quality
-                enhanced_image = self.enhanced_ocr.enhance_image_quality(image)
-                
-                # Extract text with OCR
-                page_text = self.enhanced_ocr.extract_text_with_ocr(enhanced_image)
-                if page_text.strip():
-                    all_text.append(page_text)
-            
-            doc.close()
-            return "\n".join(all_text)
-            
-        except Exception as e:
-            logging.error(f"Error applying OCR to PDF: {e}")
-            return ""
 
     # ---------------------------
     # Workers Comp extraction
@@ -2286,7 +1943,7 @@ class WelcomePage(QMainWindow):
         self.close()
 
 # ---------------------------
-# Enhanced PDFComparisonTool
+# PDFComparisonTool
 # ---------------------------
 class PDFComparisonTool(QMainWindow):
     def __init__(self, business_type, lob_name):
@@ -2317,7 +1974,7 @@ class PDFComparisonTool(QMainWindow):
             logging.error(f"Error downloading resources: {str(e)}")
 
     def init_ui(self):
-        self.setWindowTitle('Marble Box PDF Comparison Tool - Enhanced')
+        self.setWindowTitle('Marble Box PDF Comparison Tool')
         self.setGeometry(100, 100, 800, 600)
         self.setStyleSheet(f"background-color: {COLORS['background']};")
 
@@ -2371,7 +2028,7 @@ class PDFComparisonTool(QMainWindow):
             logo_label.setAlignment(Qt.AlignCenter)
             main_layout.addWidget(logo_label)
 
-        writeup_label = QLabel(f"{self.lob_name} - Enhanced OCR & Email System")
+        writeup_label = QLabel(self.lob_name)
         writeup_label.setAlignment(Qt.AlignCenter)
         writeup_label.setStyleSheet(f"color: {COLORS['primary']}; font-size: 14px; font-weight: bold;")
         main_layout.addWidget(writeup_label)
@@ -2409,7 +2066,7 @@ class PDFComparisonTool(QMainWindow):
         self.excel_button.setStyleSheet(button_style)
         frame_layout.addWidget(self.excel_button)
 
-        self.compare_button = QPushButton('Run Enhanced Comparison')
+        self.compare_button = QPushButton('Run Comparison')
         self.compare_button.setStyleSheet(button_style)
         frame_layout.addWidget(self.compare_button)
 
@@ -2440,7 +2097,7 @@ class PDFComparisonTool(QMainWindow):
 
         main_layout.addWidget(frame)
 
-        footer_label = QLabel('©(2025) Marble Box . All Rights Reserved - Enhanced Version')
+        footer_label = QLabel('©(2025) Marble Box . All Rights Reserved')
         footer_label.setStyleSheet(f"color: {COLORS['text']}; font-size: 12px; margin-top: 10px;")
         footer_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(footer_label)
@@ -2496,19 +2153,15 @@ class PDFComparisonTool(QMainWindow):
         try:
             if not all([self.pdf1_path, self.pdf2_path, self.excel_path]):
                 raise ValueError("Please select all required files")
-            self.status_label.setText('Processing PDFs with enhanced OCR... Please wait.')
+            self.status_label.setText('Processing PDFs... Please wait.')
             self.progress_bar.setValue(80)
             self.thread = PDFProcessingThread(self.pdf1_path, self.pdf2_path, self.excel_path, field_definitions=self.field_definitions)
             self.thread.processing_done.connect(self.on_processing_done)
-            self.thread.progress_update.connect(self.on_progress_update)
             self.thread.start()
         except Exception as e:
             self.status_label.setText(f'Error: {str(e)}')
             QMessageBox.critical(self, 'Error', str(e))
             self.progress_bar.setValue(0)
-
-    def on_progress_update(self, message):
-        self.status_label.setText(message)
 
     def on_processing_done(self, data1, data2, error_message):
         if error_message:
@@ -2516,19 +2169,10 @@ class PDFComparisonTool(QMainWindow):
             QMessageBox.critical(self, 'Error', error_message)
             self.progress_bar.setValue(0)
         else:
-            self.status_label.setText('Enhanced comparison completed successfully!')
+            self.status_label.setText('Comparison completed successfully!')
             self.progress_bar.setValue(100)
-            QMessageBox.information(self, 'Success', 'PDF comparison with enhanced OCR completed successfully!')
+            QMessageBox.information(self, 'Success', 'PDF comparison completed successfully!')
             self.view_excel_button.setEnabled(True)
-            
-            # Send completion email notification
-            try:
-                subject = "PDF Comparison Completed"
-                body = f"Your PDF comparison for {self.lob_name} has been completed successfully.\n\nResults have been saved to: {self.excel_path}"
-                # Note: You would need to get the user's email from the login system
-                # send_email("user@example.com", subject, body, [self.excel_path])
-            except Exception as e:
-                logging.error(f"Failed to send completion email: {e}")
 
     def open_excel_viewer(self):
         if self.excel_path and os.path.exists(self.excel_path):
@@ -2611,7 +2255,7 @@ login_window = None
 class LoginWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Marble Box - Enhanced Login")
+        self.setWindowTitle("Marble Box - Login")
         self.setGeometry(100, 100, 400, 300)
         if os.path.exists("temp/icon.png"):
             self.setWindowIcon(QIcon("temp/icon.png"))
@@ -2687,15 +2331,6 @@ class LoginWindow(QMainWindow):
                 self.settings.setValue("rememberedEmail", email)
             else:
                 self.settings.remove("rememberedEmail")
-            
-            # Send login notification email
-            try:
-                subject = "Marble Box Login Notification"
-                body = f"Hello,\n\nYou have successfully logged into the Marble Box PDF Comparison Tool.\n\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\nRegards,\nMarble Box Team"
-                send_email(email, subject, body)
-            except Exception as e:
-                logging.error(f"Failed to send login notification: {e}")
-            
             self.open_welcome_page()
         else:
             QMessageBox.critical(self, "Error", "Invalid email or password.")
@@ -2713,19 +2348,7 @@ class LoginWindow(QMainWindow):
         QMessageBox.information(self, "Reset Password", f"A reset code has been sent to your email.\nTemporary Code: {temp_code}")
         subject = "Marble Box Password Reset Code"
         body = f"Hello,\n\nYour reset code is: {temp_code}\n\nUse this code to reset your password.\n\nRegards,\nMarble Box Team"
-        
-        # Enhanced email sending with progress feedback
-        email_thread = send_email(email, subject, body)
-        
-        def on_email_sent(success, error):
-            if success:
-                logging.info("Password reset email sent successfully")
-            else:
-                logging.error(f"Failed to send password reset email: {error}")
-                QMessageBox.warning(self, "Email Error", f"Failed to send reset email: {error}")
-        
-        email_thread.finished_signal.connect(on_email_sent)
-        
+        send_email(email, subject, body)
         dlg = ResetPasswordDialog(email, temp_code)
         dlg.exec_()
 
@@ -2736,7 +2359,7 @@ class LoginWindow(QMainWindow):
     def open_welcome_page(self):
         msg_box = QMessageBox()
         msg_box.setWindowTitle("SharePoint Access")
-        msg_box.setText("Access to SharePoint and share drive granted 😀\nEnhanced OCR and Email System Active")
+        msg_box.setText("Access to SharePoint and share drive granted 😀")
         QTimer.singleShot(2000, msg_box.accept)
         msg_box.exec_()
         self.welcome_page = WelcomePage()
@@ -2746,7 +2369,7 @@ class LoginWindow(QMainWindow):
 class SignupDialog(QDialog):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Sign Up - Enhanced")
+        self.setWindowTitle("Sign Up")
         self.setGeometry(150, 150, 350, 200)
         if os.path.exists("temp/icon.png"):
             self.setWindowIcon(QIcon("temp/icon.png"))
@@ -2777,21 +2400,10 @@ class SignupDialog(QDialog):
         temp_password = generate_temp_code()
         QMessageBox.information(self, "Registration", f"A temporary password has been sent to your email.\nTemporary Password: {temp_password}")
         subject = "Marble Box Registration - Temporary Password"
-        body = f"Hello,\n\nThank you for registering with Marble Box Enhanced PDF Comparison Tool.\nYour temporary password is: {temp_password}\n\nUse this to complete your registration.\n\nRegards,\nMarble Box Team"
-        
-        # Enhanced email sending
-        email_thread = send_email(email, subject, body)
-        
-        def on_email_sent(success, error):
-            if success:
-                logging.info("Registration email sent successfully")
-                dlg = CompleteRegistrationDialog(email, temp_password)
-                dlg.exec_()
-            else:
-                logging.error(f"Failed to send registration email: {error}")
-                QMessageBox.critical(self, "Email Error", f"Failed to send registration email: {error}")
-        
-        email_thread.finished_signal.connect(on_email_sent)
+        body = f"Hello,\n\nThank you for registering.\nYour temporary password is: {temp_password}\n\nUse this to complete your registration.\n\nRegards,\nMarble Box Team"
+        send_email(email, subject, body)
+        dlg = CompleteRegistrationDialog(email, temp_password)
+        dlg.exec_()
         self.close()
 
 class CompleteRegistrationDialog(QDialog):
@@ -2799,7 +2411,7 @@ class CompleteRegistrationDialog(QDialog):
         super().__init__()
         self.email = email
         self.temp_password = temp_password
-        self.setWindowTitle("Complete Registration - Enhanced")
+        self.setWindowTitle("Complete Registration")
         self.setGeometry(200, 200, 350, 250)
         if os.path.exists("temp/icon.png"):
             self.setWindowIcon(QIcon("temp/icon.png"))
@@ -2845,16 +2457,8 @@ class CompleteRegistrationDialog(QDialog):
 
         QMessageBox.information(self, "Success", "Registration completed. You can now log in.")
         subject = "Marble Box Registration Completed"
-        body = f"Hello,\n\nYour registration for the Enhanced Marble Box PDF Comparison Tool is now complete. You can log in with your new password.\n\nRegards,\nMarble Box Team"
-        
-        # Enhanced email sending
-        email_thread = send_email(self.email, subject, body)
-        
-        def on_email_sent(success, error):
-            if not success:
-                logging.error(f"Failed to send completion email: {error}")
-        
-        email_thread.finished_signal.connect(on_email_sent)
+        body = f"Hello,\n\nYour registration is now complete. You can log in with your new password.\n\nRegards,\nMarble Box Team"
+        send_email(self.email, subject, body)
         self.close()
 
 class ResetPasswordDialog(QDialog):
@@ -2862,7 +2466,7 @@ class ResetPasswordDialog(QDialog):
         super().__init__()
         self.email = email
         self.temp_code = temp_code
-        self.setWindowTitle("Reset Password - Enhanced")
+        self.setWindowTitle("Reset Password")
         self.setGeometry(200, 200, 350, 250)
         if os.path.exists("temp/icon.png"):
             self.setWindowIcon(QIcon("temp/icon.png"))
@@ -2908,94 +2512,15 @@ class ResetPasswordDialog(QDialog):
             save_users(users)
             QMessageBox.information(self, "Success", "Password has been reset. A confirmation email has been sent.")
             subject = "Marble Box Password Reset Confirmation"
-            body = f"Hello,\n\nYour password for the Enhanced Marble Box PDF Comparison Tool has been reset successfully.\n\nRegards,\nMarble Box Team"
-            
-            # Enhanced email sending
-            email_thread = send_email(self.email, subject, body)
-            
-            def on_email_sent(success, error):
-                if not success:
-                    logging.error(f"Failed to send confirmation email: {error}")
-            
-            email_thread.finished_signal.connect(on_email_sent)
+            body = f"Hello,\n\nYour password has been reset successfully.\n\nRegards,\nMarble Box Team"
+            send_email(self.email, subject, body)
             self.close()
         else:
             QMessageBox.critical(self, "Error", "Email not found.")
             self.close()
 
 # ---------------------------
-# Enhanced Email Test Dialog
-# ---------------------------
-class EmailTestDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Email System Test")
-        self.setGeometry(200, 200, 400, 300)
-        self.setStyleSheet(f"background-color: {COLORS['login_bg']};")
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        
-        # Email input
-        self.email_input = QLineEdit()
-        self.email_input.setPlaceholderText("Enter test email address")
-        layout.addWidget(QLabel("Test Email Address:"))
-        layout.addWidget(self.email_input)
-        
-        # Subject input
-        self.subject_input = QLineEdit()
-        self.subject_input.setText("Marble Box Email System Test")
-        layout.addWidget(QLabel("Subject:"))
-        layout.addWidget(self.subject_input)
-        
-        # Message input
-        self.message_input = QLineEdit()
-        self.message_input.setText("This is a test email from the enhanced Marble Box system.")
-        layout.addWidget(QLabel("Message:"))
-        layout.addWidget(self.message_input)
-        
-        # Send button
-        send_button = QPushButton("Send Test Email")
-        send_button.setStyleSheet(f"background-color: {COLORS['login_primary']}; color: white; padding: 10px;")
-        send_button.clicked.connect(self.send_test_email)
-        layout.addWidget(send_button)
-        
-        # Status label
-        self.status_label = QLabel("Ready to send test email")
-        self.status_label.setStyleSheet(f"color: {COLORS['login_primary']};")
-        layout.addWidget(self.status_label)
-
-    def send_test_email(self):
-        email = self.email_input.text().strip()
-        subject = self.subject_input.text().strip()
-        message = self.message_input.text().strip()
-        
-        if not email or not subject or not message:
-            QMessageBox.warning(self, "Error", "Please fill in all fields.")
-            return
-        
-        self.status_label.setText("Sending test email...")
-        
-        # Send test email
-        email_thread = send_email(email, subject, message)
-        
-        def on_email_sent(success, error):
-            if success:
-                self.status_label.setText("Test email sent successfully!")
-                QMessageBox.information(self, "Success", "Test email sent successfully!")
-            else:
-                self.status_label.setText(f"Failed to send email: {error}")
-                QMessageBox.critical(self, "Error", f"Failed to send email: {error}")
-        
-        def on_progress(message):
-            self.status_label.setText(f"Progress: {message}")
-        
-        email_thread.finished_signal.connect(on_email_sent)
-        email_thread.progress_signal.connect(on_progress)
-
-# ---------------------------
-# Main Application with Enhanced Features
+# Main
 # ---------------------------
 login_window = None
 
@@ -3003,25 +2528,6 @@ def main():
     try:
         app = QApplication(sys.argv)
         app.setStyle("Fusion")
-        
-        # Create temp directory for resources
-        os.makedirs("temp", exist_ok=True)
-        
-        # Download and cache resources
-        try:
-            if not os.path.exists("temp/logo.png"):
-                response = requests.get(LOGO_URL)
-                with open("temp/logo.png", "wb") as f:
-                    f.write(response.content)
-            
-            if not os.path.exists("temp/icon.png"):
-                response = requests.get(ICON_URL)
-                with open("temp/icon.png", "wb") as f:
-                    f.write(response.content)
-        except Exception as e:
-            logging.warning(f"Failed to download resources: {e}")
-        
-        # Show splash screen
         splash = SplashScreen()
         splash.show()
         splash.start()
@@ -3033,24 +2539,9 @@ def main():
             splash.close()
 
         QTimer.singleShot(3000, on_splash_finished)
-        
-        # Add menu for email testing (for debugging)
-        def show_email_test():
-            email_test = EmailTestDialog()
-            email_test.exec_()
-        
-        # You can add this to the main window menu if needed
-        # main_window.menuBar().addAction("Test Email", show_email_test)
-        
-        logging.info("Enhanced Marble Box PDF Comparison Tool started successfully")
-        logging.info("Features: Enhanced OCR, Improved Email System, Better Error Handling")
-        
         sys.exit(app.exec_())
-        
     except Exception as e:
         logging.error(f"Application error: {str(e)}")
-        if 'app' in locals():
-            QMessageBox.critical(None, "Application Error", f"Failed to start application: {str(e)}")
 
 if __name__ == '__main__':
     main()
